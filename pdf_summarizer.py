@@ -38,10 +38,16 @@ except ImportError:
 
 try:
     import nltk
+    # Vercel fix: download NLTK data to /tmp
+    nltk_data_path = os.path.join('/tmp', 'nltk_data')
+    if not os.path.exists(nltk_data_path):
+        os.makedirs(nltk_data_path, exist_ok=True)
+    nltk.data.path.append(nltk_data_path)
+
     # Download required data (silent if already present)
     for pkg in ['punkt', 'punkt_tab', 'stopwords']:
         try:
-            nltk.download(pkg, quiet=True)
+            nltk.download(pkg, download_dir=nltk_data_path, quiet=True)
         except Exception:
             pass
     from nltk.tokenize import sent_tokenize
@@ -324,50 +330,54 @@ def combine_scores(
 # PART 5 — OPTIONAL PYTORCH RE-RANKER (actually useful this time)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SentenceReRanker(nn.Module):
-    """
-    A small MLP that re-ranks sentences using their feature scores.
+if HAS_TORCH:
+    class SentenceReRanker(nn.Module):
+        """
+        A small MLP that re-ranks sentences using their feature scores.
 
-    Unlike the original code's LSTM (which used random weights producing
-    meaningless outputs), this network is:
-      1. Lightweight (3 features → 1 score)
-      2. Used for fine-grained re-ranking AFTER TF-IDF has done the heavy lifting
-      3. Can be fine-tuned if labeled data is available
+        Unlike the original code's LSTM (which used random weights producing
+        meaningless outputs), this network is:
+          1. Lightweight (3 features → 1 score)
+          2. Used for fine-grained re-ranking AFTER TF-IDF has done the heavy lifting
+          3. Can be fine-tuned if labeled data is available
 
-    Without training, it acts as a learnable weighted combiner.
-    With training data (sentence → importance label), it generalizes well.
-    """
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(3, 32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
+        Without training, it acts as a learnable weighted combiner.
+        With training data (sentence → importance label), it generalizes well.
+        """
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(3, 32),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(32, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1),
+                nn.Sigmoid()
+            )
 
-    def forward(self, features: 'torch.Tensor') -> 'torch.Tensor':
-        # features: [N, 3] — (tfidf_score, position_score, length_score)
-        return self.net(features).squeeze(-1)
+        def forward(self, features: 'torch.Tensor') -> 'torch.Tensor':
+            # features: [N, 3] — (tfidf_score, position_score, length_score)
+            return self.net(features).squeeze(-1)
 
-    def rerank(
-        self,
-        tfidf: np.ndarray,
-        position: np.ndarray,
-        length: np.ndarray
-    ) -> np.ndarray:
-        """Run inference without training (uses initialized weights as a combiner)."""
-        if not HAS_TORCH:
+        def rerank(
+            self,
+            tfidf: np.ndarray,
+            position: np.ndarray,
+            length: np.ndarray
+        ) -> np.ndarray:
+            """Run inference without training (uses initialized weights as a combiner)."""
+            features = np.stack([tfidf, position, length], axis=1).astype(np.float32)
+            tensor = torch.tensor(features)
+            self.eval()
+            with torch.no_grad():
+                scores = self(tensor).numpy()
+            return scores
+else:
+    class SentenceReRanker:
+        """Fallback when torch is not installed."""
+        def rerank(self, *args, **kwargs):
             return None
-        features = np.stack([tfidf, position, length], axis=1).astype(np.float32)
-        tensor = torch.tensor(features)
-        self.eval()
-        with torch.no_grad():
-            scores = self(tensor).numpy()
-        return scores
 
 
 # ─────────────────────────────────────────────────────────────────────────────
